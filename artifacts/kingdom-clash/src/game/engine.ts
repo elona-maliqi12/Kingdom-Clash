@@ -6,8 +6,9 @@ function nextId() {
   return `u${++idCounter}`;
 }
 
-export function createInitialState(w: number, h: number): GameState {
+export function createInitialState(w: number, h: number, level = 1): GameState {
   const midX = w / 2;
+  const castleScaling = 1 + (level - 1) * 0.3;
   return {
     units: [],
     projectiles: [],
@@ -22,23 +23,21 @@ export function createInitialState(w: number, h: number): GameState {
     },
     enemyCastle: {
       team: "enemy",
-      hp: 800,
-      maxHp: 800,
+      hp: Math.round(800 * castleScaling),
+      maxHp: Math.round(800 * castleScaling),
       x: midX,
       y: 60,
       width: 160,
       height: 90,
     },
-    gold: 120,
-    currentLevel: 1,
+    gold: 80,
+    currentLevel: level,
     phase: "playing",
     wave: 0,
     waveTimer: 8,
-    waveInterval: 18,
+    waveInterval: Math.max(10, 18 - level),
     floatingTexts: [],
     selectedCardIndex: null,
-    pendingPlacement: false,
-    goldPerSecond: 6,
     tickCount: 0,
     canvasWidth: w,
     canvasHeight: h,
@@ -50,7 +49,7 @@ function spawnEnemy(state: GameState, unitType: import("./types").UnitType) {
   const scaling = 1 + (state.currentLevel - 1) * 0.25;
   const stats = getScaledStats(template, state.currentLevel, scaling);
   const spawnX = 60 + Math.random() * (state.canvasWidth - 120);
-  const spawnY = 80 + Math.random() * 60;
+  const spawnY = 60 + Math.random() * 50;
 
   const unit: Unit = {
     id: nextId(),
@@ -120,28 +119,6 @@ function dist(ax: number, ay: number, bx: number, by: number) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function findTarget(unit: Unit, allUnits: Unit[], castle: Castle): { type: "unit" | "castle"; id?: string } | null {
-  const enemies = allUnits.filter((u) => u.team !== unit.team && u.state !== "dead");
-  let closest: Unit | null = null;
-  let closestDist = Infinity;
-  for (const e of enemies) {
-    const d = dist(unit.x, unit.y, e.x, e.y);
-    if (d < closestDist) {
-      closestDist = d;
-      closest = e;
-    }
-  }
-  const castleDist = dist(unit.x, unit.y, castle.x, castle.y);
-  if (!closest || castleDist < closestDist) {
-    if (castleDist < unit.attackRange) {
-      return { type: "castle" };
-    }
-    if (!closest) return null;
-  }
-  if (closest) return { type: "unit", id: closest.id };
-  return null;
-}
-
 function addFloatingText(state: GameState, x: number, y: number, text: string, color: string) {
   const ft: FloatingText = {
     id: nextId(),
@@ -176,12 +153,10 @@ export function tickGame(state: GameState, dt: number): GameState {
   if (state.phase !== "playing") return state;
 
   const s = { ...state };
-  s.units = [...state.units];
+  s.units = state.units.map((u) => ({ ...u }));
   s.projectiles = [...state.projectiles];
-  s.floatingTexts = [...state.floatingTexts];
+  s.floatingTexts = state.floatingTexts.map((f) => ({ ...f }));
   s.tickCount++;
-
-  s.gold += s.goldPerSecond * dt;
 
   s.waveTimer -= dt;
   if (s.waveTimer <= 0) {
@@ -194,12 +169,14 @@ export function tickGame(state: GameState, dt: number): GameState {
     addFloatingText(s, s.canvasWidth / 2, s.canvasHeight / 2 - 40, `Wave ${s.wave}!`, "#ffdd44");
   }
 
+  const playerCastle = { ...s.playerCastle };
+  const enemyCastle = { ...s.enemyCastle };
+
   for (const unit of s.units) {
     if (unit.state === "dead") continue;
     unit.attackTimer = Math.max(0, unit.attackTimer - dt);
 
-    const enemyCastle = unit.team === "player" ? s.enemyCastle : s.playerCastle;
-    const allies = s.units.filter((u) => u.team === unit.team && u.state !== "dead" && u.id !== unit.id);
+    const targetCastle = unit.team === "player" ? enemyCastle : playerCastle;
     const enemies = s.units.filter((u) => u.team !== unit.team && u.state !== "dead");
 
     let nearestEnemy: Unit | null = null;
@@ -212,17 +189,19 @@ export function tickGame(state: GameState, dt: number): GameState {
       }
     }
 
-    const castleDist = dist(unit.x, unit.y, enemyCastle.x, enemyCastle.y);
+    const castleDist = dist(unit.x, unit.y, targetCastle.x, targetCastle.y);
 
     let target: { x: number; y: number; isUnit: boolean; unit?: Unit; isCastle?: boolean } | null = null;
+
     if (nearestEnemy && nearestDist <= castleDist) {
       target = { x: nearestEnemy.x, y: nearestEnemy.y, isUnit: true, unit: nearestEnemy };
-    } else if (castleDist < 9999) {
-      target = { x: enemyCastle.x, y: enemyCastle.y, isUnit: false, isCastle: true };
+    } else {
+      target = { x: targetCastle.x, y: targetCastle.y, isUnit: false, isCastle: true };
     }
 
     if (target) {
       const d = dist(unit.x, unit.y, target.x, target.y);
+
       if (d > unit.attackRange) {
         const nx = (target.x - unit.x) / d;
         const ny = (target.y - unit.y) / d;
@@ -230,25 +209,20 @@ export function tickGame(state: GameState, dt: number): GameState {
         unit.y += ny * unit.speed * dt;
         unit.state = "moving";
 
-        const halfH = s.canvasHeight / 2;
-        if (unit.team === "player") {
-          unit.y = Math.max(halfH + 5, Math.min(s.canvasHeight - 30, unit.y));
-        } else {
-          unit.y = Math.min(halfH - 5, Math.max(30, unit.y));
-        }
         unit.x = Math.max(unit.radius, Math.min(s.canvasWidth - unit.radius, unit.x));
+        unit.y = Math.max(unit.radius, Math.min(s.canvasHeight - unit.radius, unit.y));
       } else if (unit.attackTimer <= 0) {
         unit.state = "attacking";
         unit.attackTimer = unit.attackCooldown;
 
         if (target.isCastle) {
-          const dmg = Math.max(1, unit.attack - (unit.team === "player" ? 0 : 0));
+          const dmg = Math.max(1, unit.attack);
           if (unit.team === "player") {
-            s.enemyCastle = { ...s.enemyCastle, hp: Math.max(0, s.enemyCastle.hp - dmg) };
-            addFloatingText(s, enemyCastle.x + (Math.random() - 0.5) * 60, enemyCastle.y - 20, `-${dmg}`, "#ff8844");
+            enemyCastle.hp = Math.max(0, enemyCastle.hp - dmg);
+            addFloatingText(s, targetCastle.x + (Math.random() - 0.5) * 60, targetCastle.y - 20, `-${dmg}`, "#ff8844");
           } else {
-            s.playerCastle = { ...s.playerCastle, hp: Math.max(0, s.playerCastle.hp - dmg) };
-            addFloatingText(s, enemyCastle.x + (Math.random() - 0.5) * 60, enemyCastle.y - 20, `-${dmg}`, "#ff4444");
+            playerCastle.hp = Math.max(0, playerCastle.hp - dmg);
+            addFloatingText(s, targetCastle.x + (Math.random() - 0.5) * 60, targetCastle.y - 20, `-${dmg}`, "#ff4444");
           }
         } else if (target.unit) {
           if (unit.isRanged) {
@@ -256,7 +230,13 @@ export function tickGame(state: GameState, dt: number): GameState {
           } else {
             const dmg = Math.max(1, unit.attack - target.unit.defense);
             target.unit.hp -= dmg;
-            addFloatingText(s, target.unit.x, target.unit.y - target.unit.radius - 10, `-${dmg}`, unit.team === "player" ? "#ff8844" : "#ff4444");
+            addFloatingText(
+              s,
+              target.unit.x,
+              target.unit.y - target.unit.radius - 10,
+              `-${dmg}`,
+              unit.team === "player" ? "#ff8844" : "#ff4444"
+            );
             if (target.unit.hp <= 0) {
               target.unit.state = "dead";
               const template = UNIT_TEMPLATES[target.unit.type];
@@ -273,6 +253,9 @@ export function tickGame(state: GameState, dt: number): GameState {
     }
   }
 
+  s.playerCastle = playerCastle;
+  s.enemyCastle = enemyCastle;
+
   for (const proj of s.projectiles) {
     const target = s.units.find((u) => u.id === proj.targetId && u.state !== "dead");
     if (!target) {
@@ -283,7 +266,10 @@ export function tickGame(state: GameState, dt: number): GameState {
     if (d < 12) {
       if (proj.isAoe) {
         const hits = s.units.filter(
-          (u) => u.team !== proj.sourceTeam && u.state !== "dead" && dist(u.x, u.y, target.x, target.y) < proj.aoeRadius
+          (u) =>
+            u.team !== proj.sourceTeam &&
+            u.state !== "dead" &&
+            dist(u.x, u.y, target.x, target.y) < proj.aoeRadius
         );
         for (const h of hits) {
           const dmg = Math.max(1, proj.damage - h.defense);
@@ -301,7 +287,13 @@ export function tickGame(state: GameState, dt: number): GameState {
       } else {
         const dmg = Math.max(1, proj.damage - target.defense);
         target.hp -= dmg;
-        addFloatingText(s, target.x, target.y - target.radius - 10, `-${dmg}`, proj.sourceTeam === "player" ? "#ff8844" : "#ff4444");
+        addFloatingText(
+          s,
+          target.x,
+          target.y - target.radius - 10,
+          `-${dmg}`,
+          proj.sourceTeam === "player" ? "#ff8844" : "#ff4444"
+        );
         if (target.hp <= 0) {
           target.state = "dead";
           const template = UNIT_TEMPLATES[target.type];
@@ -339,31 +331,5 @@ export function tickGame(state: GameState, dt: number): GameState {
 }
 
 export function startNextLevel(state: GameState): GameState {
-  const level = state.currentLevel + 1;
-  const castleScaling = 1 + (level - 1) * 0.3;
-  return {
-    ...createInitialState(state.canvasWidth, state.canvasHeight),
-    currentLevel: level,
-    gold: 150,
-    phase: "playing",
-    playerCastle: {
-      team: "player",
-      hp: 1000,
-      maxHp: 1000,
-      x: state.canvasWidth / 2,
-      y: state.canvasHeight - 60,
-      width: 160,
-      height: 90,
-    },
-    enemyCastle: {
-      team: "enemy",
-      hp: Math.round(800 * castleScaling),
-      maxHp: Math.round(800 * castleScaling),
-      x: state.canvasWidth / 2,
-      y: 60,
-      width: 160,
-      height: 90,
-    },
-    waveInterval: Math.max(10, 18 - level),
-  };
+  return createInitialState(state.canvasWidth, state.canvasHeight, state.currentLevel + 1);
 }

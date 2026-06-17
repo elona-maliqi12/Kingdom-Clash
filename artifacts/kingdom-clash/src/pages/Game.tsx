@@ -3,14 +3,11 @@ import { renderGame } from "../game/renderer";
 import { createInitialState, tickGame, spawnPlayerUnit, startNextLevel } from "../game/engine";
 import { UNIT_TEMPLATES, PLAYER_CARDS } from "../game/units";
 import { useHandTracking } from "../hooks/useHandTracking";
+import { loadStars, saveStars, computeStars, levelKey } from "../game/stars";
 import type { GameState, UnitType } from "../game/types";
 
-const CARD_COLORS: Record<string, string> = {
-  knight: "#5b8dd9",
-  archer: "#6dbf6d",
-  mage: "#b87fd9",
-  giant: "#d97a3a",
-};
+const PANEL_W = 150;
+const HUD_H = 50;
 
 const CARD_ICONS: Record<string, string> = {
   knight: "⚔️",
@@ -19,109 +16,165 @@ const CARD_ICONS: Record<string, string> = {
   giant: "🪨",
 };
 
-interface CardLevel {
+const SPAWN_COOLDOWNS: Record<UnitType, number> = {
+  knight: 8,
+  archer: 6,
+  mage: 10,
+  giant: 15,
+  goblin: 0,
+  orc: 0,
+  troll: 0,
+  darkKnight: 0,
+  dragon: 0,
+};
+
+interface CardState {
   level: number;
+  cooldownTimer: number;
 }
 
-export default function Game({ onMenu }: { onMenu: () => void }) {
+function StarDisplay({ count }: { count: number }) {
+  return (
+    <div className="flex gap-1 justify-center">
+      {[1, 2, 3].map((i) => (
+        <svg key={i} width={28} height={28} viewBox="0 0 24 24">
+          <polygon
+            points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"
+            fill={i <= count ? "#ffd700" : "#333"}
+            stroke={i <= count ? "#ffa500" : "#444"}
+            strokeWidth="1"
+          />
+        </svg>
+      ))}
+    </div>
+  );
+}
+
+export default function Game({
+  level,
+  onMenu,
+  onNextLevel,
+  onRetry,
+}: {
+  level: number;
+  onMenu: () => void;
+  onNextLevel: (stars: number) => void;
+  onRetry: () => void;
+}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<GameState | null>(null);
   const rafRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
+  const selectedCardRef = useRef<number | null>(null);
 
-  const [cardLevels, setCardLevels] = useState<CardLevel[]>(PLAYER_CARDS.map(() => ({ level: 1 })));
+  const [windowSize, setWindowSize] = useState({ w: window.innerWidth, h: window.innerHeight });
+  const canvasW = windowSize.w - PANEL_W;
+  const canvasH = windowSize.h - HUD_H;
+
+  const [cardStates, setCardStates] = useState<CardState[]>(PLAYER_CARDS.map(() => ({ level: 1, cooldownTimer: 0 })));
+  const cardStatesRef = useRef<CardState[]>(PLAYER_CARDS.map(() => ({ level: 1, cooldownTimer: 0 })));
+
   const [selectedCard, setSelectedCard] = useState<number | null>(null);
-  const [gold, setGold] = useState(120);
+  const [gold, setGold] = useState(80);
   const [phase, setPhase] = useState<GameState["phase"]>("playing");
-  const [currentLevel, setCurrentLevel] = useState(1);
   const [waveTimer, setWaveTimer] = useState(8);
   const [wave, setWave] = useState(0);
-  const [playerHp, setPlayerHp] = useState(1000);
-  const [enemyHp, setEnemyHp] = useState(800);
-  const [, forceRender] = useState(0);
-
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [dims, setDims] = useState({ w: 800, h: 600 });
+  const [playerHpFrac, setPlayerHpFrac] = useState(1);
+  const [earnedStars, setEarnedStars] = useState(0);
 
   useEffect(() => {
-    function measure() {
-      if (containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        setDims({ w: Math.floor(rect.width), h: Math.floor(rect.height - 120) });
-      }
+    function onResize() {
+      setWindowSize({ w: window.innerWidth, h: window.innerHeight });
     }
-    measure();
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   useEffect(() => {
-    if (dims.w > 100 && dims.h > 100) {
-      const initial = createInitialState(dims.w, dims.h);
-      stateRef.current = initial;
-      setGold(initial.gold);
-      setPhase(initial.phase);
-    }
-  }, [dims.w, dims.h]);
-
-  const handleHold = useCallback((x: number, y: number) => {
-    const state = stateRef.current;
-    if (!state) return;
-
-    if (state.phase === "won") {
-      stateRef.current = startNextLevel(state);
-      setCurrentLevel((l) => l + 1);
+    if (canvasW > 100 && canvasH > 100) {
+      stateRef.current = createInitialState(canvasW, canvasH, level);
+      setGold(80);
       setPhase("playing");
-      return;
-    }
-    if (state.phase === "lost") {
-      stateRef.current = createInitialState(state.canvasWidth, state.canvasHeight);
-      setPhase("playing");
-      setCurrentLevel(1);
+      setWave(0);
+      setWaveTimer(8);
+      setPlayerHpFrac(1);
+      setCardStates(PLAYER_CARDS.map(() => ({ level: 1, cooldownTimer: 0 })));
+      cardStatesRef.current = PLAYER_CARDS.map(() => ({ level: 1, cooldownTimer: 0 }));
       setSelectedCard(null);
-      return;
+      selectedCardRef.current = null;
     }
+  }, [canvasW, canvasH, level]);
 
-    if (state.phase !== "playing") return;
+  function selectCard(idx: number) {
+    const newVal = selectedCardRef.current === idx ? null : idx;
+    setSelectedCard(newVal);
+    selectedCardRef.current = newVal;
+  }
 
-    const CARD_AREA_HEIGHT = 120;
-    const canvasH = dims.h;
-    const cardAreaY = canvasH;
+  function deployAtCanvasPos(cx: number, cy: number) {
+    const state = stateRef.current;
+    const idx = selectedCardRef.current;
+    if (!state || state.phase !== "playing" || idx === null) return;
+    if (cy < canvasH / 2 || cy < 0) return;
 
-    const cardW = Math.min(120, dims.w / 5);
-    const totalW = cardW * PLAYER_CARDS.length + (PLAYER_CARDS.length - 1) * 8;
-    const startX = (dims.w - totalW) / 2;
+    const card = PLAYER_CARDS[idx];
+    const cs = cardStatesRef.current[idx];
+    if (cs.cooldownTimer > 0) return;
 
-    for (let i = 0; i < PLAYER_CARDS.length; i++) {
-      const cx = startX + i * (cardW + 8);
-      if (x >= cx && x <= cx + cardW && y >= canvasH + 10 && y <= canvasH + 90) {
-        if (selectedCard === i) {
-          setSelectedCard(null);
-        } else {
-          setSelectedCard(i);
+    const cost = Math.round(card.baseCost * (1 + (cs.level - 1) * 0.5));
+    if (state.gold < cost) return;
+
+    const newState = { ...state, gold: state.gold - cost };
+    spawnPlayerUnit(newState, card.unitType, cx, cy, cs.level);
+    stateRef.current = newState;
+
+    const spawnCD = SPAWN_COOLDOWNS[card.unitType];
+    const updatedCards = cardStatesRef.current.map((c, i) =>
+      i === idx ? { ...c, cooldownTimer: spawnCD } : c
+    );
+    cardStatesRef.current = updatedCards;
+    setCardStates([...updatedCards]);
+    setSelectedCard(null);
+    selectedCardRef.current = null;
+  }
+
+  const handleHold = useCallback(
+    (vx: number, vy: number) => {
+      const state = stateRef.current;
+      if (!state) return;
+
+      if (state.phase === "won" || state.phase === "lost") return;
+
+      if (vx < PANEL_W) {
+        const slotH = (windowSize.h - HUD_H) / PLAYER_CARDS.length;
+        const cardIdx = Math.floor((vy - HUD_H) / slotH);
+        if (cardIdx >= 0 && cardIdx < PLAYER_CARDS.length) {
+          selectCard(cardIdx);
         }
         return;
       }
-    }
 
-    if (selectedCard !== null && y < canvasH && y > canvasH / 2) {
-      const card = PLAYER_CARDS[selectedCard];
-      const lvl = cardLevels[selectedCard].level;
-      const cost = Math.round(card.baseCost * (1 + (lvl - 1) * 0.5));
-      if (state.gold >= cost) {
-        const newState = { ...state, gold: state.gold - cost };
-        spawnPlayerUnit(newState, card.unitType, x, y, lvl);
-        stateRef.current = newState;
-        setSelectedCard(null);
-      }
-    }
-  }, [selectedCard, cardLevels, dims]);
+      const cx = vx - PANEL_W;
+      const cy = vy - HUD_H;
+      deployAtCanvasPos(cx, cy);
+    },
+    [windowSize.h]
+  );
 
   const { cursor, holdProgress, handDetected, videoRef, isReady, error } = useHandTracking(
-    dims.w,
-    dims.h,
+    windowSize.w,
+    windowSize.h,
     handleHold
   );
+
+  const cursorCanvas = cursor && cursor.x >= PANEL_W
+    ? { x: cursor.x - PANEL_W, y: cursor.y - HUD_H }
+    : null;
+
+  const cursorOverCard = cursor && cursor.x < PANEL_W ? cursor : null;
+  const hoveredCardIdx = cursorOverCard
+    ? Math.floor((cursorOverCard.y - HUD_H) / ((windowSize.h - HUD_H) / PLAYER_CARDS.length))
+    : -1;
 
   useEffect(() => {
     function loop(ts: number) {
@@ -129,32 +182,52 @@ export default function Game({ onMenu }: { onMenu: () => void }) {
       const canvas = canvasRef.current;
       const state = stateRef.current;
       if (!canvas || !state) return;
-
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
 
-      const dt = Math.min((ts - lastTimeRef.current) / 1000, 0.1);
+      const dt = Math.min((ts - (lastTimeRef.current || ts)) / 1000, 0.1);
       lastTimeRef.current = ts;
 
       if (state.phase === "playing") {
         const newState = tickGame(state, dt);
         stateRef.current = newState;
-
         setGold(Math.floor(newState.gold));
         setPhase(newState.phase);
-        setCurrentLevel(newState.currentLevel);
         setWaveTimer(Math.ceil(newState.waveTimer));
         setWave(newState.wave);
-        setPlayerHp(newState.playerCastle.hp);
-        setEnemyHp(newState.enemyCastle.hp);
+        setPlayerHpFrac(newState.playerCastle.hp / newState.playerCastle.maxHp);
+
+        if (newState.phase === "won" || newState.phase === "lost") {
+          const stars = computeStars(
+            newState.playerCastle.hp / newState.playerCastle.maxHp,
+            newState.phase === "won"
+          );
+          setEarnedStars(stars);
+
+          if (newState.phase === "won") {
+            const allStars = loadStars();
+            const key = levelKey(level);
+            if ((allStars[key] ?? 0) < stars) {
+              allStars[key] = stars;
+              saveStars(allStars);
+            }
+          }
+        }
+
+        const updatedCards = cardStatesRef.current.map((c) => ({
+          ...c,
+          cooldownTimer: Math.max(0, c.cooldownTimer - dt),
+        }));
+        cardStatesRef.current = updatedCards;
+        setCardStates([...updatedCards]);
       }
 
-      renderGame(ctx, stateRef.current!, cursor, videoRef.current, handDetected, holdProgress);
+      renderGame(ctx, stateRef.current!, cursorCanvas, videoRef.current, handDetected, holdProgress);
     }
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [cursor, handDetected, holdProgress, videoRef]);
+  }, [cursorCanvas, handDetected, holdProgress, videoRef]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -162,248 +235,293 @@ export default function Game({ onMenu }: { onMenu: () => void }) {
       if (!state) return;
 
       if (e.key === "n" || e.key === "N") {
-        if (state.phase === "won") {
-          stateRef.current = startNextLevel(state);
-          setCurrentLevel((l) => l + 1);
-          setPhase("playing");
-        }
+        if (state.phase === "won") onNextLevel(earnedStars);
       }
       if (e.key === "r" || e.key === "R") {
-        if (state.phase === "lost") {
-          stateRef.current = createInitialState(state.canvasWidth, state.canvasHeight);
-          setPhase("playing");
-          setCurrentLevel(1);
-        }
+        if (state.phase === "lost") onRetry();
       }
-
       if (["1", "2", "3", "4"].includes(e.key)) {
         const idx = parseInt(e.key) - 1;
-        if (idx < PLAYER_CARDS.length) {
-          setSelectedCard((prev) => (prev === idx ? null : idx));
-        }
+        if (idx < PLAYER_CARDS.length) selectCard(idx);
       }
-
-      if (e.key === "Escape") setSelectedCard(null);
+      if (e.key === "Escape") {
+        setSelectedCard(null);
+        selectedCardRef.current = null;
+      }
     }
-
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [earnedStars, onNextLevel, onRetry]);
+
+  function handleCanvasClick(e: React.MouseEvent) {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    deployAtCanvasPos(cx, cy);
+  }
 
   function upgradeCard(index: number) {
-    const lvl = cardLevels[index].level;
-    if (lvl >= 10) return;
-    const upgradeCost = 50 * lvl;
+    const cs = cardStatesRef.current[index];
+    if (cs.level >= 10) return;
+    const upgradeCost = 50 * cs.level;
     const state = stateRef.current;
     if (!state || state.gold < upgradeCost) return;
     stateRef.current = { ...state, gold: state.gold - upgradeCost };
     setGold(Math.floor(stateRef.current.gold));
-    setCardLevels((prev) => {
-      const next = [...prev];
-      next[index] = { level: lvl + 1 };
-      return next;
-    });
+    const updated = cardStatesRef.current.map((c, i) =>
+      i === index ? { ...c, level: c.level + 1 } : c
+    );
+    cardStatesRef.current = updated;
+    setCardStates([...updated]);
   }
 
-  function handleCanvasClick(e: React.MouseEvent) {
-    const state = stateRef.current;
-    if (!state || state.phase !== "playing") return;
-    if (selectedCard === null) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    if (y < dims.h / 2) return;
-
-    const card = PLAYER_CARDS[selectedCard];
-    const lvl = cardLevels[selectedCard].level;
-    const cost = Math.round(card.baseCost * (1 + (lvl - 1) * 0.5));
-    if (state.gold >= cost) {
-      const newState = { ...state, gold: state.gold - cost };
-      spawnPlayerUnit(newState, card.unitType, x, y, lvl);
-      stateRef.current = newState;
-      setSelectedCard(null);
-    }
-  }
-
-  const cardW = Math.min(120, dims.w / 5);
+  const slotH = (windowSize.h - HUD_H) / PLAYER_CARDS.length;
+  const CARD_COLORS: Record<string, string> = {
+    knight: "#5b8dd9",
+    archer: "#6dbf6d",
+    mage: "#b87fd9",
+    giant: "#d97a3a",
+  };
 
   return (
     <div
-      ref={containerRef}
-      className="flex flex-col h-screen bg-black overflow-hidden"
-      style={{ fontFamily: "monospace" }}
+      className="fixed inset-0 overflow-hidden"
+      style={{ fontFamily: "monospace", background: "#000" }}
     >
+      {/* Top HUD */}
       <div
-        className="flex items-center justify-between px-4 py-2 text-xs shrink-0"
-        style={{ background: "rgba(0,0,0,0.8)", borderBottom: "1px solid #333" }}
+        className="absolute top-0 left-0 right-0 flex items-center justify-between px-4"
+        style={{ height: HUD_H, background: "rgba(0,0,0,0.85)", borderBottom: "1px solid #222", zIndex: 20 }}
       >
         <button
           onClick={onMenu}
-          className="text-gray-400 hover:text-white transition-colors px-2 py-1 rounded border border-gray-700 hover:border-gray-400"
+          className="text-gray-400 hover:text-white transition-colors px-2 py-1 rounded border border-gray-700 hover:border-gray-400 text-xs"
         >
           ← Menu
         </button>
-        <div className="flex items-center gap-6 text-center">
-          <div>
+        <div className="flex items-center gap-6">
+          <div className="text-center">
             <div className="text-gray-500 text-xs">LEVEL</div>
-            <div className="text-yellow-400 font-bold text-lg">{currentLevel}</div>
+            <div className="text-yellow-400 font-bold">{level}</div>
           </div>
-          <div>
+          <div className="text-center">
             <div className="text-gray-500 text-xs">GOLD</div>
-            <div className="text-yellow-300 font-bold text-lg">⚙ {gold}</div>
+            <div className="text-yellow-300 font-bold">⚙ {gold}</div>
           </div>
-          <div>
+          <div className="text-center">
             <div className="text-gray-500 text-xs">WAVE</div>
-            <div className="text-cyan-400 font-bold text-lg">{wave}</div>
+            <div className="text-cyan-400 font-bold">{wave}</div>
           </div>
-          <div>
-            <div className="text-gray-500 text-xs">NEXT WAVE</div>
-            <div className="text-red-400 font-bold text-lg">{waveTimer}s</div>
+          <div className="text-center">
+            <div className="text-gray-500 text-xs">NEXT</div>
+            <div className="text-red-400 font-bold">{waveTimer}s</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <div
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ background: handDetected ? "#00ccff" : "#333", boxShadow: handDetected ? "0 0 6px #00ccff" : "none" }}
+            />
+            <span className="text-xs text-gray-500">
+              {!isReady ? (error ? "Cam error" : "Loading...") : handDetected ? "Tracked" : "No hand"}
+            </span>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs">
-          <div
-            className="w-2 h-2 rounded-full"
-            style={{ background: handDetected ? "#00ccff" : "#444", boxShadow: handDetected ? "0 0 6px #00ccff" : "none" }}
-          />
-          <span className="text-gray-400">{isReady ? (handDetected ? "Hand tracked" : "No hand") : error ? "Cam error" : "Loading..."}</span>
-        </div>
+        <div className="w-16" />
       </div>
 
-      <div className="relative flex-1 overflow-hidden">
-        <canvas
-          ref={canvasRef}
-          width={dims.w}
-          height={dims.h}
-          className="block"
-          style={{ cursor: selectedCard !== null ? "crosshair" : "default" }}
-          onClick={handleCanvasClick}
-        />
-        {selectedCard !== null && phase === "playing" && (
-          <div
-            className="absolute top-2 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full text-xs font-bold text-white"
-            style={{ background: "rgba(0,0,0,0.7)", border: "1px solid rgba(100,200,255,0.4)" }}
-          >
-            {UNIT_TEMPLATES[PLAYER_CARDS[selectedCard].unitType].label} selected — click your side or hold two fingers to deploy
-          </div>
-        )}
-      </div>
-
+      {/* Left card panel */}
       <div
-        className="shrink-0 flex items-center justify-center gap-2 px-4 py-3"
-        style={{ background: "rgba(0,0,0,0.9)", borderTop: "1px solid #333", minHeight: 120 }}
+        className="absolute left-0 bottom-0 flex flex-col"
+        style={{ top: HUD_H, width: PANEL_W, background: "rgba(0,0,0,0.88)", borderRight: "1px solid #1a1a2a", zIndex: 10 }}
       >
         {PLAYER_CARDS.map((card, i) => {
+          const cs = cardStates[i];
           const template = UNIT_TEMPLATES[card.unitType];
-          const lvl = cardLevels[i].level;
-          const cost = Math.round(card.baseCost * (1 + (lvl - 1) * 0.5));
-          const upgradeCost = 50 * lvl;
+          const cost = Math.round(card.baseCost * (1 + (cs.level - 1) * 0.5));
+          const upgradeCost = 50 * cs.level;
           const canAfford = gold >= cost;
-          const canUpgrade = lvl < 10 && gold >= upgradeCost;
+          const onCooldown = cs.cooldownTimer > 0;
+          const cdTotal = SPAWN_COOLDOWNS[card.unitType];
+          const cdFrac = cdTotal > 0 ? cs.cooldownTimer / cdTotal : 0;
           const isSelected = selectedCard === i;
           const color = CARD_COLORS[card.unitType];
+          const isHovered = hoveredCardIdx === i;
 
           return (
             <div
               key={card.unitType}
-              className="flex flex-col items-center gap-1 rounded-lg transition-all duration-150"
-              style={{ width: cardW }}
+              className="flex flex-col relative"
+              style={{ height: slotH, borderBottom: "1px solid #1a1a2a", flexShrink: 0 }}
             >
+              {/* Cooldown overlay */}
+              {onCooldown && (
+                <div
+                  className="absolute inset-0 z-10 flex items-center justify-center"
+                  style={{ background: "rgba(0,0,0,0.55)", pointerEvents: "none" }}
+                >
+                  <div className="text-center">
+                    <div className="text-white font-bold text-sm">{cs.cooldownTimer.toFixed(1)}s</div>
+                    <div
+                      className="mt-1 rounded-full overflow-hidden"
+                      style={{ width: 60, height: 5, background: "#222" }}
+                    >
+                      <div
+                        style={{ height: "100%", width: `${(1 - cdFrac) * 100}%`, background: color, transition: "width 0.1s linear" }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Card main button */}
               <button
-                onClick={() => {
-                  if (phase !== "playing") return;
-                  setSelectedCard((prev) => (prev === i ? null : i));
-                }}
-                className="w-full rounded-lg p-2 flex flex-col items-center gap-1 transition-all duration-150"
+                onClick={() => { if (phase === "playing") selectCard(i); }}
+                className="flex-1 flex flex-col items-center justify-center gap-1 transition-all duration-100"
                 style={{
                   background: isSelected
-                    ? `rgba(${hexToRgb(color)}, 0.3)`
-                    : canAfford
-                    ? "rgba(30,30,40,0.9)"
-                    : "rgba(20,20,25,0.7)",
-                  border: isSelected
-                    ? `2px solid ${color}`
-                    : canAfford
-                    ? `2px solid ${color}55`
-                    : "2px solid #333",
-                  boxShadow: isSelected ? `0 0 16px ${color}55` : "none",
-                  opacity: canAfford ? 1 : 0.5,
-                  minHeight: 70,
+                    ? `rgba(${hexRgb(color)},0.25)`
+                    : isHovered
+                    ? "rgba(255,255,255,0.05)"
+                    : "transparent",
+                  border: "none",
+                  borderLeft: isSelected ? `3px solid ${color}` : "3px solid transparent",
+                  cursor: phase === "playing" && !onCooldown ? "pointer" : "default",
+                  paddingLeft: 4,
                 }}
               >
                 <div className="text-2xl">{CARD_ICONS[card.unitType]}</div>
-                <div className="text-xs font-bold" style={{ color }}>
-                  {template.label}
-                </div>
-                <div className="text-xs text-yellow-300 font-bold">⚙ {cost}</div>
+                <div className="text-xs font-bold" style={{ color }}>{template.label}</div>
+                <div className="text-xs text-yellow-300">⚙ {cost}</div>
                 <div
-                  className="text-xs px-1 rounded"
-                  style={{ background: "rgba(255,215,0,0.15)", color: "#ffd700" }}
+                  className="text-xs px-1.5 py-0.5 rounded"
+                  style={{ background: "rgba(255,215,0,0.1)", color: "#ffd700", border: "1px solid rgba(255,215,0,0.2)" }}
                 >
-                  Lv {lvl}
+                  Lv {cs.level}
                 </div>
-                <div className="text-xs text-gray-500">[{i + 1}]</div>
+                {!canAfford && !onCooldown && (
+                  <div className="text-xs" style={{ color: "#cc4444" }}>No gold</div>
+                )}
+                <div className="text-xs text-gray-600">[{i + 1}]</div>
               </button>
 
+              {/* Upgrade button */}
               <button
                 onClick={() => upgradeCard(i)}
-                disabled={!canUpgrade}
-                className="w-full text-xs py-1 rounded font-bold transition-all duration-150"
+                disabled={cs.level >= 10 || gold < upgradeCost}
+                className="w-full text-xs py-1 font-bold transition-all duration-100"
                 style={{
-                  background: canUpgrade ? "rgba(255,215,0,0.15)" : "rgba(30,30,30,0.5)",
-                  color: canUpgrade ? "#ffd700" : "#444",
-                  border: canUpgrade ? "1px solid rgba(255,215,0,0.4)" : "1px solid #333",
-                  cursor: canUpgrade ? "pointer" : "not-allowed",
+                  background: cs.level < 10 && gold >= upgradeCost ? "rgba(255,215,0,0.1)" : "rgba(20,20,20,0.5)",
+                  color: cs.level < 10 && gold >= upgradeCost ? "#ffd700" : "#333",
+                  border: "none",
+                  borderTop: "1px solid #1a1a2a",
+                  cursor: cs.level < 10 && gold >= upgradeCost ? "pointer" : "not-allowed",
                 }}
               >
-                {lvl >= 10 ? "MAX" : `UP ⚙${upgradeCost}`}
+                {cs.level >= 10 ? "MAX" : `▲ ${upgradeCost}g`}
               </button>
             </div>
           );
         })}
       </div>
 
+      {/* Game canvas */}
+      <canvas
+        ref={canvasRef}
+        width={canvasW}
+        height={canvasH}
+        className="absolute"
+        style={{
+          left: PANEL_W,
+          top: HUD_H,
+          cursor: selectedCard !== null ? "crosshair" : "default",
+        }}
+        onClick={handleCanvasClick}
+      />
+
+      {/* Deploy hint */}
+      {selectedCard !== null && phase === "playing" && (
+        <div
+          className="absolute text-xs font-bold text-white rounded-full px-3 py-1 pointer-events-none"
+          style={{
+            top: HUD_H + 8,
+            left: PANEL_W + 8,
+            background: "rgba(0,0,0,0.7)",
+            border: "1px solid rgba(100,200,255,0.4)",
+          }}
+        >
+          {UNIT_TEMPLATES[PLAYER_CARDS[selectedCard].unitType].label} — click your side to deploy
+        </div>
+      )}
+
+      {/* Victory overlay */}
       {phase === "won" && (
-        <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
-          <div className="flex gap-4 pointer-events-auto" style={{ marginTop: "20%" }}>
-            <button
-              onClick={() => {
-                const state = stateRef.current;
-                if (!state) return;
-                stateRef.current = startNextLevel(state);
-                setCurrentLevel((l) => l + 1);
-                setPhase("playing");
-              }}
-              className="px-8 py-3 text-lg font-black rounded-lg uppercase"
-              style={{ background: "#c0a855", color: "#000", boxShadow: "0 0 30px rgba(192,168,85,0.5)" }}
-            >
-              Next Level →
-            </button>
+        <div className="absolute inset-0 flex items-center justify-center z-30" style={{ background: "rgba(0,0,0,0.65)" }}>
+          <div
+            className="flex flex-col items-center gap-5 rounded-2xl px-10 py-8"
+            style={{ background: "rgba(10,20,10,0.95)", border: "2px solid #c0a855", boxShadow: "0 0 60px rgba(192,168,85,0.3)" }}
+          >
+            <div className="text-5xl font-black" style={{ color: "#ffd700", textShadow: "0 0 30px rgba(255,215,0,0.5)", fontFamily: "monospace" }}>
+              VICTORY!
+            </div>
+            <div className="text-gray-300 text-sm">Level {level} Complete</div>
+            <StarDisplay count={earnedStars} />
+            <div className="text-xs text-gray-500 text-center">
+              {earnedStars === 3 ? "Perfect! Castle nearly untouched." : earnedStars === 2 ? "Good fight! Castle took some damage." : "Close call! Castle barely survived."}
+            </div>
+            <div className="flex gap-3 mt-2">
+              <button
+                onClick={() => onNextLevel(earnedStars)}
+                className="px-8 py-3 text-base font-black rounded-lg uppercase transition-all"
+                style={{ background: "#c0a855", color: "#000", fontFamily: "monospace" }}
+                onMouseEnter={(e) => e.currentTarget.style.transform = "scale(1.05)"}
+                onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}
+              >
+                Next Level →
+              </button>
+              <button
+                onClick={onMenu}
+                className="px-6 py-3 text-sm font-bold rounded-lg border transition-all"
+                style={{ borderColor: "#444", color: "#aaa", background: "transparent" }}
+              >
+                Menu
+              </button>
+            </div>
           </div>
         </div>
       )}
+
+      {/* Defeat overlay */}
       {phase === "lost" && (
-        <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
-          <div className="flex gap-4 pointer-events-auto" style={{ marginTop: "20%" }}>
-            <button
-              onClick={() => {
-                const state = stateRef.current;
-                if (!state) return;
-                stateRef.current = createInitialState(state.canvasWidth, state.canvasHeight);
-                setPhase("playing");
-                setCurrentLevel(1);
-                setSelectedCard(null);
-                setCardLevels(PLAYER_CARDS.map(() => ({ level: 1 })));
-              }}
-              className="px-8 py-3 text-lg font-black rounded-lg uppercase"
-              style={{ background: "#cc4444", color: "#fff", boxShadow: "0 0 30px rgba(204,68,68,0.5)" }}
-            >
-              Retry
-            </button>
+        <div className="absolute inset-0 flex items-center justify-center z-30" style={{ background: "rgba(0,0,0,0.65)" }}>
+          <div
+            className="flex flex-col items-center gap-5 rounded-2xl px-10 py-8"
+            style={{ background: "rgba(20,5,5,0.95)", border: "2px solid #cc4444", boxShadow: "0 0 60px rgba(204,68,68,0.3)" }}
+          >
+            <div className="text-5xl font-black" style={{ color: "#cc4444", textShadow: "0 0 30px rgba(204,68,68,0.5)", fontFamily: "monospace" }}>
+              DEFEATED
+            </div>
+            <div className="text-gray-300 text-sm">Your castle has fallen on Level {level}</div>
+            <StarDisplay count={0} />
+            <div className="flex gap-3 mt-2">
+              <button
+                onClick={onRetry}
+                className="px-8 py-3 text-base font-black rounded-lg uppercase transition-all"
+                style={{ background: "#cc4444", color: "#fff", fontFamily: "monospace" }}
+                onMouseEnter={(e) => e.currentTarget.style.transform = "scale(1.05)"}
+                onMouseLeave={(e) => e.currentTarget.style.transform = "scale(1)"}
+              >
+                Retry
+              </button>
+              <button
+                onClick={onMenu}
+                className="px-6 py-3 text-sm font-bold rounded-lg border transition-all"
+                style={{ borderColor: "#444", color: "#aaa", background: "transparent" }}
+              >
+                Menu
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -411,7 +529,7 @@ export default function Game({ onMenu }: { onMenu: () => void }) {
   );
 }
 
-function hexToRgb(hex: string): string {
+function hexRgb(hex: string): string {
   const r = parseInt(hex.slice(1, 3), 16);
   const g = parseInt(hex.slice(3, 5), 16);
   const b = parseInt(hex.slice(5, 7), 16);

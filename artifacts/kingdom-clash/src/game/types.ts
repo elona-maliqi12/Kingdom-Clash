@@ -65,13 +65,15 @@ export interface Castle {
   height: number;
 }
 
-export interface CardDef {
+export interface CardState {
   unitType: UnitType;
   label: string;
-  description: string;
   baseCost: number;
   color: string;
   level: number;
+  cooldown: number;
+  cooldownTimer: number;
+  spawnCooldown: number;
 }
 
 export interface FloatingText {
@@ -98,8 +100,6 @@ export interface GameState {
   waveInterval: number;
   floatingTexts: FloatingText[];
   selectedCardIndex: number | null;
-  pendingPlacement: boolean;
-  goldPerSecond: number;
   tickCount: number;
   canvasWidth: number;
   canvasHeight: number;
@@ -119,4 +119,8 @@ export interface UnitTemplate {
   radius: number;
   color: string;
   goldReward?: number;
+}
+
+export interface LevelStars {
+  [levelKey: string]: number;
 }
