@@ -1,4 +1,4 @@
-import type { UnitTemplate, UnitType } from "./types";
+import type { UnitTemplate, UnitType, SpawnEntry, PlayerCard } from "./types";
 
 export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
   knight: {
@@ -70,7 +70,6 @@ export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
     isAoe: false,
     radius: 13,
     color: "#a0cc3a",
-    goldReward: 10,
   },
   orc: {
     type: "orc",
@@ -85,7 +84,6 @@ export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
     isAoe: false,
     radius: 22,
     color: "#7abf40",
-    goldReward: 20,
   },
   troll: {
     type: "troll",
@@ -100,7 +98,6 @@ export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
     isAoe: false,
     radius: 26,
     color: "#5a9e3a",
-    goldReward: 35,
   },
   darkKnight: {
     type: "darkKnight",
@@ -114,8 +111,7 @@ export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
     isRanged: false,
     isAoe: false,
     radius: 24,
-    color: "#4a3070",
-    goldReward: 50,
+    color: "#7a50bb",
   },
   dragon: {
     type: "dragon",
@@ -130,15 +126,14 @@ export const UNIT_TEMPLATES: Record<UnitType, UnitTemplate> = {
     isAoe: true,
     radius: 32,
     color: "#cc3a3a",
-    goldReward: 120,
   },
 };
 
-export const PLAYER_CARDS = [
-  { unitType: "knight" as UnitType, baseCost: 60 },
-  { unitType: "archer" as UnitType, baseCost: 40 },
-  { unitType: "mage" as UnitType, baseCost: 80 },
-  { unitType: "giant" as UnitType, baseCost: 120 },
+export const PLAYER_CARDS: PlayerCard[] = [
+  { unitType: "knight", manaCost: 3, icon: "⚔️" },
+  { unitType: "archer", manaCost: 2, icon: "🏹" },
+  { unitType: "mage",   manaCost: 4, icon: "✨" },
+  { unitType: "giant",  manaCost: 5, icon: "🪨" },
 ];
 
 export function getScaledStats(template: UnitTemplate, level: number, scaling = 1.0) {
@@ -151,23 +146,36 @@ export function getScaledStats(template: UnitTemplate, level: number, scaling = 
   };
 }
 
-export function getEnemyWaveComposition(level: number, wave: number): UnitType[] {
-  const difficulty = level + Math.floor(wave / 3);
-  const units: UnitType[] = [];
-  const count = 2 + Math.min(difficulty, 6);
+const LEVEL_COMPOSITIONS: UnitType[][] = [
+  // Level 1 — Goblins only
+  ["goblin", "goblin", "goblin", "goblin", "goblin"],
+  // Level 2 — Goblins + Orcs
+  ["goblin", "goblin", "orc", "goblin", "orc", "goblin"],
+  // Level 3 — Orcs rising
+  ["goblin", "orc", "orc", "goblin", "orc", "orc"],
+  // Level 4 — Trolls arrive
+  ["goblin", "orc", "troll", "orc", "goblin", "troll"],
+  // Level 5 — Heavy trolls
+  ["orc", "troll", "orc", "troll", "orc", "troll"],
+  // Level 6 — Dark Knights
+  ["orc", "troll", "darkKnight", "orc", "troll", "darkKnight"],
+  // Level 7 — Elite force
+  ["troll", "darkKnight", "troll", "darkKnight", "darkKnight"],
+  // Level 8 — Dragon appears
+  ["darkKnight", "troll", "dragon", "darkKnight", "troll"],
+  // Level 9 — Double dragon
+  ["darkKnight", "dragon", "troll", "darkKnight", "dragon"],
+  // Level 10 — Armageddon
+  ["dragon", "darkKnight", "dragon", "darkKnight", "dragon", "darkKnight"],
+];
 
-  for (let i = 0; i < count; i++) {
-    if (difficulty >= 8 && Math.random() < 0.3) {
-      units.push("dragon");
-    } else if (difficulty >= 5 && Math.random() < 0.3) {
-      units.push("darkKnight");
-    } else if (difficulty >= 3 && Math.random() < 0.35) {
-      units.push("troll");
-    } else if (difficulty >= 2 && Math.random() < 0.4) {
-      units.push("orc");
-    } else {
-      units.push("goblin");
-    }
-  }
-  return units;
+export function getLevelSpawnQueue(level: number): SpawnEntry[] {
+  const comp = LEVEL_COMPOSITIONS[Math.min(level - 1, LEVEL_COMPOSITIONS.length - 1)];
+  const scaling = 1 + (level - 1) * 0.25;
+  let delay = 3;
+  return comp.map((unitType) => {
+    const entry: SpawnEntry = { delay, unitType };
+    delay += 5 + Math.random() * 4;
+    return entry;
+  });
 }

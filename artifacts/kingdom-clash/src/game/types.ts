@@ -13,11 +13,6 @@ export type Team = "player" | "enemy";
 
 export type UnitState = "moving" | "attacking" | "dead";
 
-export interface Vec2 {
-  x: number;
-  y: number;
-}
-
 export interface Unit {
   id: string;
   type: UnitType;
@@ -33,7 +28,6 @@ export interface Unit {
   attackCooldown: number;
   attackTimer: number;
   state: UnitState;
-  targetId: string | null;
   isRanged: boolean;
   isAoe: boolean;
   level: number;
@@ -65,15 +59,9 @@ export interface Castle {
   height: number;
 }
 
-export interface CardState {
+export interface SpawnEntry {
+  delay: number;
   unitType: UnitType;
-  label: string;
-  baseCost: number;
-  color: string;
-  level: number;
-  cooldown: number;
-  cooldownTimer: number;
-  spawnCooldown: number;
 }
 
 export interface FloatingText {
@@ -92,14 +80,14 @@ export interface GameState {
   projectiles: Projectile[];
   playerCastle: Castle;
   enemyCastle: Castle;
-  gold: number;
+  mana: number;
+  maxMana: number;
+  manaPerSecond: number;
   currentLevel: number;
-  phase: "playing" | "won" | "lost" | "menu" | "levelup";
-  wave: number;
-  waveTimer: number;
-  waveInterval: number;
+  phase: "playing" | "won" | "lost";
+  spawnQueue: SpawnEntry[];
+  spawnTimer: number;
   floatingTexts: FloatingText[];
-  selectedCardIndex: number | null;
   tickCount: number;
   canvasWidth: number;
   canvasHeight: number;
@@ -118,9 +106,14 @@ export interface UnitTemplate {
   isAoe: boolean;
   radius: number;
   color: string;
-  goldReward?: number;
 }
 
 export interface LevelStars {
   [levelKey: string]: number;
+}
+
+export interface PlayerCard {
+  unitType: UnitType;
+  manaCost: number;
+  icon: string;
 }

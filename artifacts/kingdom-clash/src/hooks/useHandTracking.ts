@@ -1,38 +1,40 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import { HandLandmarker, FilesetResolver } from "@mediapipe/tasks-vision";
 
 export interface HandTrackingResult {
   cursor: { x: number; y: number } | null;
-  holdProgress: number;
-  holdFired: boolean;
+  isPinching: boolean;
   handDetected: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   isReady: boolean;
   error: string | null;
 }
 
-const HOLD_DURATION = 0.6;
-const TWO_FINGER_THRESHOLD = 0.12;
+const PINCH_THRESHOLD = 0.09;
 
 export function useHandTracking(
   viewportWidth: number,
   viewportHeight: number,
-  onHold: (x: number, y: number) => void
+  onPinchStart: (x: number, y: number) => void,
+  onPinchEnd: (x: number, y: number) => void
 ): HandTrackingResult {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const landmarkerRef = useRef<HandLandmarker | null>(null);
   const animRef = useRef<number>(0);
-  const holdTimerRef = useRef<number>(0);
-  const holdFiredFlagRef = useRef(false);
-  const onHoldRef = useRef(onHold);
-  onHoldRef.current = onHold;
+
+  const onPinchStartRef = useRef(onPinchStart);
+  const onPinchEndRef = useRef(onPinchEnd);
+  onPinchStartRef.current = onPinchStart;
+  onPinchEndRef.current = onPinchEnd;
 
   const [cursor, setCursor] = useState<{ x: number; y: number } | null>(null);
-  const [holdProgress, setHoldProgress] = useState(0);
+  const [isPinching, setIsPinching] = useState(false);
   const [handDetected, setHandDetected] = useState(false);
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [holdFired, setHoldFired] = useState(false);
+
+  const isPinchingRef = useRef(false);
+  const cursorRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -43,7 +45,6 @@ export function useHandTracking(
         const vision = await FilesetResolver.forVisionTasks(
           "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
         );
-
         const landmarker = await HandLandmarker.createFromOptions(vision, {
           baseOptions: {
             modelAssetPath:
@@ -53,7 +54,6 @@ export function useHandTracking(
           runningMode: "VIDEO",
           numHands: 1,
         });
-
         if (!mounted) return;
         landmarkerRef.current = landmarker;
 
@@ -61,36 +61,29 @@ export function useHandTracking(
           video: { facingMode: "user", width: { ideal: 640 }, height: { ideal: 480 } },
           audio: false,
         });
-
-        if (!mounted) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
 
         const video = document.createElement("video");
         video.srcObject = stream;
         video.autoplay = true;
         video.playsInline = true;
         video.muted = true;
-
-        await new Promise<void>((resolve, reject) => {
+        await new Promise<void>(resolve => {
           video.onloadeddata = () => resolve();
-          video.onerror = () => reject(new Error("Video load error"));
-          setTimeout(() => resolve(), 5000);
+          setTimeout(resolve, 5000);
         });
-
         await video.play().catch(() => {});
         videoRef.current = video;
         if (mounted) setIsReady(true);
       } catch (e: any) {
-        if (mounted) setError(e?.message || "Camera or MediaPipe failed to initialize");
+        if (mounted) setError(e?.message ?? "Camera / MediaPipe failed");
       }
     }
 
     init();
     return () => {
       mounted = false;
-      stream?.getTracks().forEach((t) => t.stop());
+      stream?.getTracks().forEach(t => t.stop());
       cancelAnimationFrame(animRef.current);
       landmarkerRef.current?.close();
     };
@@ -98,7 +91,6 @@ export function useHandTracking(
 
   useEffect(() => {
     if (!isReady) return;
-
     let lastTs = 0;
 
     function loop(ts: number) {
@@ -106,66 +98,54 @@ export function useHandTracking(
       const video = videoRef.current;
       const landmarker = landmarkerRef.current;
       if (!video || !landmarker || video.readyState < 2 || video.paused) return;
-
       if (ts - lastTs < 33) return;
       lastTs = ts;
 
       let results;
-      try {
-        results = landmarker.detectForVideo(video, ts);
-      } catch {
-        return;
-      }
+      try { results = landmarker.detectForVideo(video, ts); } catch { return; }
 
       const landmarks = results?.landmarks?.[0];
-
       if (!landmarks || landmarks.length === 0) {
+        if (isPinchingRef.current && cursorRef.current) {
+          isPinchingRef.current = false;
+          setIsPinching(false);
+          onPinchEndRef.current(cursorRef.current.x, cursorRef.current.y);
+        }
         setHandDetected(false);
         setCursor(null);
-        holdTimerRef.current = 0;
-        holdFiredFlagRef.current = false;
-        setHoldProgress(0);
+        cursorRef.current = null;
         return;
       }
 
       setHandDetected(true);
 
+      // Index finger tip = landmark 8, thumb tip = landmark 4
       const indexTip = landmarks[8];
-
-      const cx = (1 - indexTip.x) * viewportWidth;
-      const cy = indexTip.y * viewportHeight;
-
-      setCursor({ x: cx, y: cy });
-
-      const middleTip = landmarks[12];
+      const thumbTip = landmarks[4];
       const wrist = landmarks[0];
       const indexMCP = landmarks[5];
 
+      const cx = (1 - indexTip.x) * viewportWidth;
+      const cy = indexTip.y * viewportHeight;
+      setCursor({ x: cx, y: cy });
+      cursorRef.current = { x: cx, y: cy };
+
+      // Normalize pinch distance by hand size
       const handSize = Math.hypot(wrist.x - indexMCP.x, wrist.y - indexMCP.y) || 0.1;
-      const fingerDist = Math.hypot(indexTip.x - middleTip.x, indexTip.y - middleTip.y);
-      const normalizedDist = fingerDist / handSize;
+      const pinchDist = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+      const normalizedPinch = pinchDist / handSize;
 
-      const isTwoFinger = normalizedDist < TWO_FINGER_THRESHOLD;
+      const wasPinching = isPinchingRef.current;
+      const nowPinching = normalizedPinch < PINCH_THRESHOLD;
 
-      if (isTwoFinger) {
-        holdTimerRef.current = Math.min(holdTimerRef.current + 0.05, HOLD_DURATION + 0.05);
-        const progress = Math.min(holdTimerRef.current / HOLD_DURATION, 1);
-        setHoldProgress(progress);
-
-        if (progress >= 1 && !holdFiredFlagRef.current) {
-          holdFiredFlagRef.current = true;
-          setHoldFired(true);
-          onHoldRef.current(cx, cy);
-          setTimeout(() => setHoldFired(false), 100);
-          holdTimerRef.current = 0;
-          setHoldProgress(0);
+      if (nowPinching !== wasPinching) {
+        isPinchingRef.current = nowPinching;
+        setIsPinching(nowPinching);
+        if (nowPinching) {
+          onPinchStartRef.current(cx, cy);
+        } else {
+          onPinchEndRef.current(cx, cy);
         }
-      } else {
-        holdTimerRef.current = Math.max(0, holdTimerRef.current - 0.04);
-        if (holdTimerRef.current === 0) {
-          holdFiredFlagRef.current = false;
-        }
-        setHoldProgress(Math.max(0, holdTimerRef.current / HOLD_DURATION));
       }
     }
 
@@ -173,5 +153,5 @@ export function useHandTracking(
     return () => cancelAnimationFrame(animRef.current);
   }, [isReady, viewportWidth, viewportHeight]);
 
-  return { cursor, holdProgress, holdFired, handDetected, videoRef, isReady, error };
+  return { cursor, isPinching, handDetected, videoRef, isReady, error };
 }
