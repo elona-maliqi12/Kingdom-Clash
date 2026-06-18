@@ -10,7 +10,11 @@ export interface HandTrackingResult {
   error: string | null;
 }
 
-const PINCH_THRESHOLD = 0.09;
+// Hysteresis: enter pinch when distance drops below PINCH_ENTER,
+// stay pinched until it rises above PINCH_EXIT.
+// Real-world thumb-index pinch normalized to hand size reads ~0.10–0.20.
+const PINCH_ENTER = 0.20;
+const PINCH_EXIT  = 0.28;
 
 export function useHandTracking(
   viewportWidth: number,
@@ -136,7 +140,10 @@ export function useHandTracking(
       const normalizedPinch = pinchDist / handSize;
 
       const wasPinching = isPinchingRef.current;
-      const nowPinching = normalizedPinch < PINCH_THRESHOLD;
+      // Hysteresis: only change state when crossing the appropriate threshold
+      const nowPinching = wasPinching
+        ? normalizedPinch < PINCH_EXIT    // already pinching → stay until fingers open
+        : normalizedPinch < PINCH_ENTER;  // not pinching → start when fingers close
 
       if (nowPinching !== wasPinching) {
         isPinchingRef.current = nowPinching;

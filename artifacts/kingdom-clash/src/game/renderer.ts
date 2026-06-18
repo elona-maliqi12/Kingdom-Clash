@@ -106,20 +106,35 @@ export function renderGame(
 
   // Camera feed (bottom-right corner)
   if (cameraVideo && cameraVideo.readyState >= 2) {
-    const fw = 160, fh = 106;
-    const fx = W - fw - 10, fy = H - fh - 10;
+    const fw = 300, fh = 200;
+    const fx = W - fw - 12, fy = H - fh - 12;
+
+    // Rounded clip
     ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(fx, fy, fw, fh, 8);
+    ctx.clip();
+
+    // Mirror the feed horizontally
     ctx.translate(fx + fw, fy);
     ctx.scale(-1, 1);
     ctx.drawImage(cameraVideo, 0, 0, fw, fh);
     ctx.restore();
-    ctx.strokeStyle = handDetected ? "#00ccff" : "#333";
+
+    // Border
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(fx, fy, fw, fh, 8);
+    ctx.strokeStyle = handDetected ? "#00ccff" : "#2a2a2a";
     ctx.lineWidth = 2;
-    ctx.strokeRect(fx, fy, fw, fh);
-    ctx.font = "bold 10px monospace";
-    ctx.fillStyle = handDetected ? "#00ccff" : "#555";
+    ctx.stroke();
+    ctx.restore();
+
+    // Status label above feed
+    ctx.font = "bold 11px monospace";
+    ctx.fillStyle = handDetected ? "#00ccff" : "#444";
     ctx.textAlign = "left";
-    ctx.fillText(handDetected ? "✓ TRACKED" : "NO HAND", fx + 4, fy - 4);
+    ctx.fillText(handDetected ? "✓ HAND TRACKED" : "NO HAND DETECTED", fx + 4, fy - 6);
   }
 }
 
